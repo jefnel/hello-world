@@ -1,0 +1,176 @@
+---
+title: "Opioid_final"
+author: "Jessica Nelson"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(maps)
+library(data.table)
+library(lme4)
+library(caret)
+setwd("~/Desktop/448")
+overdoses = read.csv("overdoses.csv")
+prescriberinfo = read.csv("prescriber-info.csv")
+limit.rows = 25000
+df = data.frame(fread("prescriber-info.csv",nrows=limit.rows))
+opioids = read.csv("opioids.csv")
+opioids <- as.character(opioids[,1]) # First column contains the n
+opioids <- gsub("\ |-",".",opioids) # replace hyphens and spaces with periods to match the dataset
+df <- df[, !names(df) %in% opioids]
+char_cols = c("NPI", names(df)[vapply(df, is.character, TRUE)])
+df[, char_cols] = lapply(df[,char_cols], as.factor)
+str(df[, 1:16])
+df %>%
+  group_by(State) %>%
+  dplyr::summarise(state.counts = n()) %>%
+  arrange(state.counts)
+rare.abbrev = df %>%
+  group_by(State) %>%
+  dplyr::summarise(state.counts = n()) %>%
+  arrange(state.counts) %>%
+  filter(state.counts <10) %>%
+  select(State)
+levels(df$State) = c(levels(df$State), "other")
+df$State[df$state %in% rare.abbrev$State] = "other"
+df$State = droplevels(df$State)
+df = cbind(df[names(df) != "State"], dummy(df$State))
+df$ZZ = NULL
+df$AE = NULL
+df$PR = NULL
+df$AA = NULL
+df$GU = NULL
+df$VI = NULL
+df %>%
+  group_by(Credentials) %>%
+  dplyr::summarise(credential.counts = n()) %>%
+  arrange(credential.counts) %>%
+  data.frame() %>%
+  head(n = 25)
+df %<>%
+  select(-Credentials)
+df %>%
+  group_by(Specialty) %>%
+  dplyr::summarise(specialty.counts = n()) %>%
+  arrange(desc(specialty.counts)) %>%
+  data.frame() %>%
+  glimpse()
+common.specialties = df %>%
+  group_by(Specialty) %>%
+  dplyr::summarise(specialty.counts = n()) %>%
+  arrange(desc(specialty.counts)) %>%
+  filter(specialty.counts > 50) %>%
+  select(Specialty)
+common.specialties = levels(droplevels(common.specialties$Specialty))
+new.specialties = factor(x = rep("other", nrow(df)), levels = c(common.specialties, "Surgeon", "other", "Pain.Mgmt"))
+new.specialties[df$Specialty %in% common.specialties] = df$Specialty [df$Specialty %in% common.specialties]
+new.specialties[grepl("surg", df$Specialty, ignore.case = TRUE)] = "Surgeon"
+new.specialties[grepl("pain", df$Specialty, ignore.case = TRUE)] = "Pain.Mgmt"
+new.specialties = droplevels(new.specialties)
+df$Specialty = new.specialties
+df %>%
+  group_by(Specialty) %>%
+  dplyr::summarise(specialty.counts = n()) %>%
+  arrange(desc(specialty.counts)) %>%
+  data.frame() %>%
+  head(n = 25)
+df = df[ ! is.na(df$Specialty),]
+df = cbind(df[, names(df) != "Specialty"], dummy(df$Specialty))
+df = df[vapply(df, function(x) if (is.numeric(x)) {sum(x) > 0} else {TRUE}, FUN.VALUE = TRUE)]
+set.seed(42)
+train_faction = 0.8
+train_ind <- sample(nrow(df),round(train_faction*nrow(df)))
+df %<>% select (-NPI)
+df$Opioid.Prescriber = as.factor(ifelse(df$Opioid.Prescriber ==1, "yes", "no"))
+train_set = df[train_ind,]
+test_set = df[-train_ind,]
+objControl = trainControl(method = 'cv', number = 5, returnResamp = 'none', summaryFunction = twoClassSummary, classProbs = TRUE)
+model = train(train_set %>% select(-Opioid.Prescriber), train_set$Opioid.Prescriber, 
+              method = 'gbm',
+              metric = "ROC",
+              trControl = objControl)
+predictions = predict(model, test_set %>% select(-Opioid.Prescriber), type ="raw")
+confusionMatrix(predictions, test_set$Opioid.Prescriber, positive = "yes")
+predictions <- predict(model,test_set%>% select(-Opioid.Prescriber),type="raw")
+confusionMatrix(predictions,test_set$Opioid.Prescriber,positive="yes")
+
+importance = as.data.frame(varImp(model)[1])
+importance = cbind(row.names(importance), Importance = importance)
+row.names(importance) = NULL
+names(importance) = c("Feature", "Importance")
+importance %>% arrange(desc(Importance)) %>%
+  mutate(Feature = factor(Feature, levels  = as.character(Feature))) %>%
+  slice(1:15) %>%
+  ggplot() + geom_bar(aes(x = Feature, y = (Importance)), stat = "identity", fill = "blue") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), axis.ticks.x = element_blank()) + ylab("Importance") + ggtitle("Feature Importance for Detecting Opioid Prescription")
+
+mean(predictions!=test_set$Opioid.Prescriber)
+
+##Big decision tree with pruning:
+tree.df = tree(Opioid.Prescriber ~., train_set) #y = Opiate.Prescriber
+summary(tree.df)
+plot(tree.df)
+#text() function to display node labels
+#pretty=0 tells R to include the category names
+#for qualitative predictors
+text(tree.df,pretty=0)
+
+#tree object display the split criterion
+#number of observations in the branch, the deviance, 
+#overall prediction for the branch
+#proportions of Y/N
+tree.df
+
+#pruning the tree
+set.seed(3)
+#cv.tree selects the optimal level of tree complexity
+#FUN=prune.misclass means that we want the 
+#classfication error to guide the CV
+#default seting is deviance
+cv.df=cv.tree(tree.df,FUN=prune.misclass)
+names(cv.df)
+cv.df
+#dev: CV error rate
+#size: number of terminal nodes of each tree
+#k: complexity parameter (corresponds to alpha)
+prune.df=prune.misclass(tree.df,best=9)
+plot(prune.df)
+text(prune.df,pretty=0)
+#prune tree
+tree.pred=predict(prune.df,test_set,type="class")
+table(tree.pred,test_set$Opioid.Prescriber)
+test.set1 = as.numeric(as.character(test_set))
+mean(tree.pred!=test_set$Opioid.Prescriber)
+
+##Bagging
+library(randomForest)
+bag.df=randomForest(Opioid.Prescriber~.,data=train_set, mtry=329,importance=TRUE)
+bag.df
+yhat.bag = predict(bag.df,newdata=test_set)
+yhat.bag #check all are yes, no
+table(yhat.bag,test_set$Opioid.Prescriber)
+mean(yhat.bag!=test_set$Opioid.Prescriber)
+barplot(yhat.bag, xlab = "Feature", ylab = "Importance", col = "purple")
+summary(yhat.bag)
+varImpPlot(bag.df,type=2)
+
+##Random Forest
+set.seed(1)
+rf.df=randomForest(Opioid.Prescriber~.,data=train_set,importance=TRUE)
+yhat.rf = predict(rf.df,newdata=test_set)
+yhat.rf #check all are yes, no
+table(yhat.rf,test_set$Opioid.Prescriber)
+mean(yhat.rf!=test_set$Opioid.Prescriber)
+varImpPlot(rf.df,type=2)
+
+```
+
